@@ -2,12 +2,20 @@
 from pymavlink import mavutil
 import time
 import threading
+import cv2
+import datetime
 
 # Connect to Pixhawk
 print("Connecting to Pixhawk...")
 master = mavutil.mavlink_connection('/dev/ttyAMA0', baud=57600)
 master.wait_heartbeat()
-print(f"â Connected! System: {master.target_system}, Component: {master.target_component}")
+print(f"✓ Connected! System: {master.target_system}, Component: {master.target_component}")
+
+# Initialize Camera Global (Must be on from start)
+print("Initializing Camera...")
+cap = cv2.VideoCapture(0)
+# Allow camera to warm up
+time.sleep(2)
 
 # Request data streams
 print("Requesting data streams...")
@@ -18,7 +26,7 @@ master.mav.request_data_stream_send(
     4,
     1
 )
-print("â Data streams requested!")
+print("✓ Data streams requested!")
 time.sleep(1)
 
 # Global flag for telemetry
@@ -70,7 +78,7 @@ def set_mode(mode):
     """Set flight mode"""
     mode_id = master.mode_mapping()[mode]
     master.set_mode(mode_id)
-    print(f"â Mode set to: {mode}")
+    print(f"✓ Mode set to: {mode}")
     time.sleep(1)
 
 def arm_drone():
@@ -86,10 +94,10 @@ def arm_drone():
         if msg and msg.type == 2:
             armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED != 0
             if armed:
-                print("â Armed!")
+                print("✓ Armed!")
                 return True
     
-    print("â  Could not arm - check pre-arm conditions")
+    print("⚠️ Could not arm - check pre-arm conditions")
     return False
 
 def disarm():
@@ -105,7 +113,7 @@ def disarm():
         if msg and msg.type == 2:
             armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED != 0
             if not armed:
-                print("â Disarmed!")
+                print("✓ Disarmed!")
                 return True
     return False
 
@@ -140,7 +148,7 @@ def takeoff_with_throttle(target_altitude):
             
             # Check if target reached
             if current_alt >= target_altitude * 0.95:
-                print("â Target altitude reached!")
+                print("✓ Target altitude reached!")
                 break
         
         time.sleep(0.5)
@@ -182,10 +190,92 @@ def goto_location(lat, lon, alt):
             
             # Check if reached
             if distance < 2:  # Within 2 meters
-                print("â Target coordinates reached!")
+                print("✓ Target coordinates reached!")
                 break
         
         time.sleep(0.5)
+
+def descend_to_scan_height(lat, lon, target_alt):
+    """
+    Descend to specific altitude while maintaining position
+    """
+    print("\n" + "="*50)
+    print(f"--- DESCENDING TO SCAN ALTITUDE: {target_alt:.1f}m ---")
+    print("="*50)
+    
+    # Send waypoint with new altitude
+    master.mav.mission_item_send(
+        master.target_system,
+        master.target_component,
+        0,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+        2, 0, 0, 0, 0, 0,
+        lat, lon, target_alt
+    )
+    
+    # Monitor descent
+    while True:
+        msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
+        if msg:
+            current_alt = msg.relative_alt / 1000.0
+            print(f"[DESCEND] Altitude: {current_alt:.2f}m / {target_alt:.1f}m")
+            
+            # Check if altitude reached (within 0.5m)
+            if abs(current_alt - target_alt) < 0.5:
+                print("✓ Scan altitude reached!")
+                break
+        time.sleep(0.5)
+
+def scan_qr_code():
+    """
+    Scan for QR code using existing camera feed
+    """
+    print("\n" + "="*50)
+    print("--- SCANNING FOR QR CODE ---")
+    print("="*50)
+    
+    detector = cv2.QRCodeDetector()
+    filename = "qr_data.txt"
+    start_time = time.time()
+    timeout = 20  # Scan for 20 seconds max
+    
+    print(f"Scanning... (Timeout: {timeout}s)")
+    
+    while (time.time() - start_time) < timeout:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            continue
+            
+        # Detect and decode
+        data, vertices, _ = detector.detectAndDecode(frame)
+
+        if data:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            output_line = f"[{timestamp}] {data}\n"
+            
+            # Save to file
+            with open(filename, "a") as f:
+                f.write(output_line)
+            
+            # Display on CLI
+            print(f"\n✓ QR CAPTURED: {data}")
+            print(f"Saved to {filename}")
+            
+            # Visual feedback (optional for headless, but requested)
+            if vertices is not None:
+                frame = cv2.polylines(frame, [vertices.astype(int)], True, (0, 255, 0), 2)
+                # cv2.imshow("QR Scanner", frame) # Commented out for headless safety
+                # cv2.waitKey(1)
+            return True
+
+        # cv2.imshow("QR Scanner", frame)
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #    break
+            
+    print("⚠️ No QR code detected within timeout")
+    return False
 
 def land_with_throttle():
     """
@@ -218,7 +308,7 @@ def land_with_throttle():
             
             # Check if landed
             if current_alt < 0.2:
-                print("â Landed successfully!")
+                print("✓ Landed successfully!")
                 break
         
         time.sleep(0.5)
@@ -227,13 +317,13 @@ def land_with_throttle():
 try:
     print("\n" + "="*50)
     print("AUTONOMOUS GPS MISSION")
-    print("Takeoff â Navigate â Land")
+    print("Takeoff → Navigate → Descend → Scan → Land")
     print("="*50)
     
     # Start telemetry
     telemetry_thread = threading.Thread(target=telemetry_monitor, daemon=True)
     telemetry_thread.start()
-    print("â Telemetry monitoring started\n")
+    print("✓ Telemetry monitoring started\n")
     time.sleep(2)
     
     # Check GPS
@@ -242,20 +332,17 @@ try:
     print(f"Satellites: {sats}, Fix Type: {fix_type}")
     
     if sats < 8 or fix_type < 3:
-        print("\nâ  WARNING: Insufficient GPS!")
+        print("\n⚠️ WARNING: Insufficient GPS!")
         print(f"  Current: {sats} satellites, Fix type: {fix_type}")
         print(f"  Required: 8+ satellites, Fix type: 3 (3D fix)")
-        print("\nTips:")
-        print("  - Go outside with clear sky view")
-        print("  - Wait 2-5 minutes for GPS lock")
-        print("  - Keep away from buildings/trees")
         
         proceed = input("\nContinue anyway? (NOT RECOMMENDED - type 'yes'): ").lower()
         if proceed != 'yes':
             show_telemetry = False
+            cap.release()
             exit()
     else:
-        print("â GPS lock good!")
+        print("✓ GPS lock good!")
     
     # Get current position
     print("\n--- Current Position ---")
@@ -265,7 +352,7 @@ try:
         print(f"Longitude: {curr_lon:.6f}")
         print(f"Altitude:  {curr_alt:.1f}m")
     else:
-        print("â  Could not get current position")
+        print("⚠️ Could not get current position")
     
     # Get target from user
     print("\n" + "="*50)
@@ -293,16 +380,16 @@ try:
     print("\n" + "!"*50)
     print("!!! FINAL SAFETY CHECK !!!")
     print("!"*50)
-    print("â Propellers attached and secured")
-    print("â Clear flight area (no people/obstacles)")
-    print("â RC transmitter ON and ready to override")
-    print("â Battery fully charged")
-    print("â Emergency plan ready")
+    print("☑ Propellers attached and secured")
+    print("☑ Clear flight area")
+    print("☑ RC transmitter ON")
+    print("☑ Camera Initialized")
     
-    confirm = input("\nâ  START AUTONOMOUS MISSION? Type 'START': ").upper()
+    confirm = input("\n⚠️ START AUTONOMOUS MISSION? Type 'START': ").upper()
     if confirm != 'START':
         show_telemetry = False
         print("Mission cancelled.")
+        cap.release()
         exit()
     
     # Countdown
@@ -314,7 +401,7 @@ try:
         time.sleep(1)
     
     # Execute mission
-    print("\nð MISSION START ð\n")
+    print("\n🚀 MISSION START 🚀\n")
     
     # 1. Set GUIDED mode
     set_mode('GUIDED')
@@ -323,8 +410,9 @@ try:
     # 2. Arm
     armed = arm_drone()
     if not armed:
-        print("\nâ  Mission aborted - could not arm")
+        print("\n⚠️ Mission aborted - could not arm")
         show_telemetry = False
+        cap.release()
         exit()
     time.sleep(2)
     
@@ -336,19 +424,30 @@ try:
     goto_location(target_lat, target_lon, target_alt)
     time.sleep(3)
     
-    # 5. Land with throttle ramping
+    # 5. NEW: Descend to 40% altitude
+    scan_altitude = target_alt * 0.40
+    descend_to_scan_height(target_lat, target_lon, scan_altitude)
+    time.sleep(2)
+
+    # 6. NEW: Scan for QR
+    scan_qr_code()
+    time.sleep(2)
+
+    # 7. Land with throttle ramping
     land_with_throttle()
     time.sleep(2)
     
-    # 6. Disarm
+    # 8. Disarm
     disarm()
     
     # Stop telemetry
     show_telemetry = False
+    cap.release()
+    cv2.destroyAllWindows()
     time.sleep(1)
     
     print("\n" + "="*50)
-    print("âââ MISSION COMPLETE! âââ")
+    print("✓✓✓ MISSION COMPLETE! ✓✓✓")
     print("="*50)
 
 except KeyboardInterrupt:
@@ -356,6 +455,7 @@ except KeyboardInterrupt:
     print("!!! EMERGENCY STOP - USER CANCELLED !!!")
     print("!"*50)
     show_telemetry = False
+    cap.release()
     print("Activating RTL (Return to Launch) mode...")
     set_mode('RTL')
 
@@ -364,5 +464,6 @@ except Exception as e:
     print(f"!!! ERROR: {e} !!!")
     print("!"*50)
     show_telemetry = False
+    cap.release()
     print("Activating RTL (Return to Launch) mode...")
     set_mode('RTL')
