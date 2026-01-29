@@ -5,13 +5,45 @@ import threading
 import cv2
 import datetime
 
-# --- INITIALIZE CAMERA IMMEDIATELY ---
-print("Initializing Camera...")
-cap = cv2.VideoCapture(0)
-time.sleep(2) 
+# --- ENHANCED CAMERA INITIALIZATION ---
+print("\n" + "="*50)
+print("--- INITIALIZING CAMERA ---")
+print("="*50)
+
+cap = None
+# Try different camera indices (0, 1, -1) to find the working one
+for index in [0, 1, -1]:
+    print(f"Trying camera index {index}...")
+    temp_cap = cv2.VideoCapture(index)
+    if temp_cap.isOpened():
+        # Force standard resolution for compatibility
+        temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # Force a read to prove it works
+        ret, frame = temp_cap.read()
+        if ret:
+            print(f"✓ Camera found at index {index}!")
+            cap = temp_cap
+            break
+        else:
+            print(f"✗ Camera index {index} opened but returned no image.")
+            temp_cap.release()
+    else:
+        print(f"✗ Could not open camera index {index}")
+
+if cap is None:
+    print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    print("!!! CRITICAL ERROR: NO CAMERA DETECTED !!!")
+    print("!!! CHECK CONNECTION CABLE !!!")
+    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    # We exit here because the mission requires the camera
+    exit()
+
+time.sleep(1) # Allow auto-exposure to settle
 
 # Connect to Pixhawk
-print("Connecting to Pixhawk...")
+print("\nConnecting to Pixhawk...")
 master = mavutil.mavlink_connection('/dev/ttyAMA0', baud=57600)
 master.wait_heartbeat()
 print(f"✓ Connected! System: {master.target_system}, Component: {master.target_component}")
@@ -181,6 +213,11 @@ def scan_and_save():
     print("--- SCANNING FOR QR CODE ---")
     print("="*50)
     
+    # Re-verify camera is still open
+    if not cap.isOpened():
+        print("⚠️ Camera disconnected! Attempting to reconnect...")
+        cap.open(0) # Attempt re-open
+    
     detector = cv2.QRCodeDetector()
     filename = "qr_data.txt"
     start_scan = time.time()
@@ -188,6 +225,8 @@ def scan_and_save():
     while (time.time() - start_scan) < 15:
         ret, frame = cap.read()
         if not ret:
+            print("Failed to get frame")
+            time.sleep(0.5)
             continue
         
         data, vertices, _ = detector.detectAndDecode(frame)
@@ -269,12 +308,11 @@ try:
         print(f"Altitude:  {curr_alt:.1f}m")
     
     # --- PAUSE TELEMETRY FOR INPUT ---
-    # This prevents the scrolling text from interfering with your typing
     print("\n[INFO] Pausing telemetry for data entry...")
     show_telemetry = False
     time.sleep(1) 
 
-    # Get target from user (Safe Input Loop)
+    # Get target from user
     print("\n" + "="*50)
     print("--- ENTER TARGET COORDINATES ---")
     print("="*50)
@@ -312,7 +350,6 @@ try:
     print("☑ RC transmitter ON")
     print("☑ Camera Initialized")
     
-    # Pause telemetry briefly for this input too
     show_telemetry = False
     time.sleep(0.5)
     confirm = input("\n⚠️ START AUTONOMOUS MISSION? Type 'START': ").upper()
@@ -323,16 +360,8 @@ try:
     if confirm != 'START':
         show_telemetry = False
         print("Mission cancelled.")
-        cap.release()
+        if cap: cap.release()
         exit()
-    
-    # Countdown
-    print("\n" + "!"*50)
-    print("!!! MISSION STARTING !!!")
-    print("!"*50)
-    for i in range(5, 0, -1):
-        print(f"{i}...")
-        time.sleep(1)
     
     # Execute mission
     print("\n🚀 MISSION START 🚀\n")
@@ -344,7 +373,7 @@ try:
     if not armed:
         print("\n⚠️ Mission aborted - could not arm")
         show_telemetry = False
-        cap.release()
+        if cap: cap.release()
         exit()
     time.sleep(2)
     
@@ -368,7 +397,7 @@ try:
     disarm()
     
     show_telemetry = False
-    cap.release()
+    if cap: cap.release()
     cv2.destroyAllWindows()
     time.sleep(1)
     
@@ -381,7 +410,7 @@ except KeyboardInterrupt:
     print("!!! EMERGENCY STOP - USER CANCELLED !!!")
     print("!"*50)
     show_telemetry = False
-    cap.release()
+    if cap: cap.release()
     print("Activating RTL (Return to Launch) mode...")
     set_mode('RTL')
 
@@ -390,6 +419,6 @@ except Exception as e:
     print(f"!!! ERROR: {e} !!!")
     print("!"*50)
     show_telemetry = False
-    cap.release()
+    if cap: cap.release()
     print("Activating RTL (Return to Launch) mode...")
     set_mode('RTL')
